@@ -8,13 +8,14 @@ metadata is the only thing that tells those two apart.
 
 from __future__ import annotations
 
+import threading
 import time
 
 import duckdb
 import pytest
 
 from untrusted_rows.connection import open_read_only
-from untrusted_rows.query import TimedOut, execute
+from untrusted_rows.query import BadCap, TimedOut, check_limits, execute
 
 
 def test_rows_come_back_with_their_column_names(small_db):
@@ -70,11 +71,17 @@ def test_both_caps_are_reported_even_when_neither_fired(small_db):
 
 
 def test_a_runaway_query_is_interrupted(slow_db):
+    """The bound is on the interrupt, not on the test finishing eventually.
+
+    This asserted `< 10` against a 50 ms deadline, which passes if cancelling
+    takes nine seconds. 2 seconds is still 40 times the deadline, which leaves
+    room for a loaded machine without the assertion becoming decorative.
+    """
     conn = open_read_only(slow_db)
     started = time.perf_counter()
     with pytest.raises(TimedOut):
         execute(conn, "SELECT count(*) FROM posts a, posts b WHERE a.id + b.id < 0", timeout_s=0.05)
-    assert time.perf_counter() - started < 10
+    assert time.perf_counter() - started < 2
 
 
 def test_the_connection_survives_the_interrupt(slow_db):
@@ -93,3 +100,73 @@ def test_a_database_error_reaches_the_caller_rather_than_the_worker_thread(small
     """
     with pytest.raises(duckdb.Error):
         execute(open_read_only(small_db), "SELECT nope FROM posts")
+
+
+def test_two_callers_at_once_get_their_own_rows(small_db):
+    """The bug this file did not catch until an audit went looking for it.
+
+    DuckDB's `execute` returns the connection, so the result set is connection
+    state, and the MCP SDK runs a synchronous tool body in a thread pool. On
+    one shared connection a caller that asked for `posts` came back with five
+    rows of `users`, under its own `sql` field, with no error and no truncation
+    flag. Ten rounds because it did not reproduce on every attempt.
+    """
+    conn = open_read_only(small_db)
+    seen = {}
+
+    def ask(tag: str, sql: str) -> None:
+        seen[tag] = execute(conn, sql)
+
+    for _ in range(10):
+        threads = [
+            threading.Thread(target=ask, args=("posts", "SELECT id, body FROM posts ORDER BY id")),
+            threading.Thread(target=ask, args=("users", "SELECT id, name FROM users ORDER BY id")),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+
+        assert seen["posts"].columns == ["id", "body"]
+        assert len(seen["posts"].rows) == 6
+        assert seen["users"].columns == ["id", "name"]
+        assert len(seen["users"].rows) == 3
+
+
+def test_one_callers_timeout_does_not_cancel_another_query(slow_db):
+    """`conn.interrupt()` is connection-wide and killed every query in flight.
+
+    The victim used to die with `InvalidInputException: No open result set`
+    rather than returning its rows.
+    """
+    conn = open_read_only(slow_db)
+    victim = {}
+
+    def slow_but_within_budget() -> None:
+        try:
+            victim["rows"] = execute(
+                conn, "SELECT count(*) FROM posts", timeout_s=30
+            ).rows
+        except Exception as failure:  # noqa: BLE001
+            victim["error"] = failure
+
+    thread = threading.Thread(target=slow_but_within_budget)
+    thread.start()
+    with pytest.raises(TimedOut):
+        execute(conn, "SELECT count(*) FROM posts a, posts b WHERE a.id + b.id < 0", timeout_s=0.05)
+    thread.join()
+
+    assert victim.get("error") is None
+    assert victim["rows"] == [[20000]]
+
+
+@pytest.mark.parametrize(
+    ("row_cap", "byte_cap", "timeout_s"),
+    [(0, 1000, 1.0), (-5, 1000, 1.0), (10, 0, 1.0), (10, 1000, 0), (10, 1000, -1.0)],
+)
+def test_a_cap_that_cannot_mean_anything_is_refused_before_the_query(row_cap, byte_cap, timeout_s):
+    """`--row-cap -5` reached `fetchmany(-4)` and raised a pybind11 TypeError,
+    which is not a ToolError, so the caller got a blank error. A timeout of 0
+    was worse: every query raised TimedOut before it started."""
+    with pytest.raises(BadCap):
+        check_limits(row_cap, byte_cap, timeout_s)

@@ -12,12 +12,13 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      # Constraint 4. The suite must pass with no credentials present, and
-      # strict mode turns an unrecorded call into a failure rather than a
-      # silently synthesised reply.
-      LLM_PROVIDER: stub
-      LLM_STUB_STRICT: "1"
+    # No model-call environment here on purpose. The factory template sets
+    # LLM_PROVIDER and LLM_STUB_STRICT for the stub adapter, and this project
+    # has no adapter to configure: it makes no model calls at all, so there is
+    # nothing for a stub to stand in for. The README says there is no
+    # AZURE_OPENAI_* anywhere and those two variables made that untrue of the
+    # repository if not of the code. `--disable-socket` below is what enforces
+    # constraint 4 here.
     steps:
       - uses: actions/checkout@v4
 

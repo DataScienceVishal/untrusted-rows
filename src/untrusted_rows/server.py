@@ -26,13 +26,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import duckdb
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from pydantic import BaseModel, Field
 
 from untrusted_rows import query
 from untrusted_rows.connection import catalog_names, open_read_only
-from untrusted_rows.query import TimedOut
 from untrusted_rows.sql_gate import Refused, check
 
 
@@ -58,6 +58,22 @@ class QueryRefused(ToolError):
     "Error executing tool duckdb_query" and nothing else. A refusal is the
     server working, so it belongs in the first group. This cost one round of
     the transcript printing eight identical error lines to find.
+
+    `QueryFailed` below exists because fixing that for two exception types and
+    leaving it open for the rest was the same bug with a smaller blast radius.
+    Any other `duckdb.Error` was still arriving as the bare string.
+    """
+
+
+class QueryFailed(ToolError):
+    """The statement passed the gate and DuckDB refused it anyway.
+
+    The message carries DuckDB's own text, which can name a column the caller
+    guessed at. That is a deliberate trade against the reason `unknown-table`
+    exists at the gate: table names are worth withholding because they map
+    what a database holds, while a column error on a statement whose table the
+    caller may already `SELECT *` from tells them little they could not get by
+    asking. A blank error tells them nothing at all and is the worse failure.
     """
 
 
@@ -68,6 +84,9 @@ def build_server(
     byte_cap: int = query.DEFAULT_BYTE_CAP,
     timeout_s: float = query.DEFAULT_TIMEOUT_S,
 ) -> MCPServer:
+    # Before the first request rather than on it. A cap that cannot mean
+    # anything is a startup error, not something every caller finds out about.
+    query.check_limits(row_cap, byte_cap, timeout_s)
     conn = open_read_only(database)
     # Read once at startup. The database is opened read-only and no statement
     # that could add a table survives the gate, so re-reading the catalog per
@@ -101,8 +120,11 @@ def build_server(
             outcome = query.execute(
                 conn, sql, row_cap=row_cap, byte_cap=byte_cap, timeout_s=timeout_s
             )
-        except TimedOut as expiry:
+        except query.TimedOut as expiry:
             raise QueryRefused(f"refused [timeout] {expiry}") from expiry
+        except duckdb.Error as failure:
+            detail = str(failure).splitlines()[0]
+            raise QueryFailed(f"failed [{type(failure).__name__}] {detail}") from failure
 
         return QueryOutcome(
             sql=sql,

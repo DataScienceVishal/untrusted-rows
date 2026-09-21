@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from untrusted_rows import query
+from untrusted_rows.query import BadCap
 from untrusted_rows.server import build_server
 
 
@@ -35,8 +36,11 @@ def main(argv: list[str] | None = None) -> int:
             byte_cap=args.byte_cap,
             timeout_s=args.timeout,
         )
-    except FileNotFoundError as missing:
-        print(missing, file=sys.stderr)
+    except (FileNotFoundError, BadCap) as refused:
+        # A bad cap used to reach here as an unhandled BadCap, so the server
+        # died with a traceback on stderr and an exit code of 1 that said
+        # nothing about which argument was wrong.
+        print(refused, file=sys.stderr)
         return 2
 
     server.run(transport="stdio")

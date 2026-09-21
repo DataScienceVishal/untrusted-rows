@@ -39,6 +39,11 @@ packages = ["src/untrusted_rows"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q --disable-socket --allow-unix-socket"
+# scripts/ is not a package and must not become one: the README runs the
+# transcript as `python scripts/transcript.py`, which only works while the file
+# is a file. This line is what lets tests/test_server.py import its
+# result-reading helper rather than keeping a byte-identical copy.
+pythonpath = ["scripts"]
 
 [tool.ruff]
 line-length = 100

@@ -11,11 +11,18 @@ parser rather than reading about it.
 
 The first is the FROM clause. Refusing `read_csv` by name is a deny-list, and a
 deny-list over DuckDB's table functions is a promise to track every release.
-Instead every source in a FROM clause has to be one of three things: a bare
-identifier that names something in the catalog, a name bound by a CTE in the
-same statement, or a subquery. Every table function fails that by construction,
-including the ones nobody has thought of yet, and including harmless ones like
-`range(10)`. That cost is real and it buys a rule that does not age.
+Instead every table reference in a FROM clause has to be one of two things: an
+identifier naming something in the catalog, or a name bound by a CTE in the
+same statement. Any function call there fails by construction, including the
+ones nobody has thought of yet, and including harmless ones like `range(10)`.
+That cost is real and it buys a rule that does not age.
+
+Two FROM sources are not table references at all and this rule never sees them.
+sqlglot models `(SELECT ...)` as a `Subquery` and `UNNEST([1,2,3])` as an
+`Unnest`, so neither arrives as a `Table`. Both are allowed and neither reads
+anything outside the statement. An earlier version of this docstring claimed
+every table function fails by construction, and `SELECT * FROM UNNEST([1,2,3])`
+is the counterexample that made the claim false.
 
 The second is `SELECT * FROM '/etc/passwd'`. DuckDB's replacement scan reads a
 bare string in a FROM clause as a file path with no function call anywhere in
@@ -37,8 +44,6 @@ rather than a promise to the caller.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError
@@ -48,22 +53,50 @@ from sqlglot.errors import ParseError
 # of its own.
 ALLOWED_TOP_LEVEL = (exp.Select, exp.SetOperation)
 
-# Read a file into a column, from a projection where there is no FROM source to
-# resolve against the catalog. Both are table functions in DuckDB today, so the
-# engine already rejects this use, and both are listed because "the binder
-# happens to stop it" is not a rule anyone wrote down.
-DENIED_SCALARS = frozenset({"read_text", "read_blob"})
+# Functions that read something outside the statement. The FROM-clause rule
+# already stops every one of these there, so this set is for the projection,
+# where there is no table reference to resolve against the catalog.
+#
+# It held two names until a review, on the argument that "the binder happens to
+# stop it" is not a rule anyone wrote down. That argument covers the whole
+# family, and the file was applying it to two members of it: `read_csv`,
+# `read_csv_auto`, `read_parquet`, `read_json` and `glob` all returned clean
+# from `check` and were stopped only by DuckDB's binder complaining that a
+# table function was used as a scalar.
+#
+# `current_setting` is here for a different reason. It is an ordinary scalar
+# function that the engine is happy to run, and `current_setting('temp_directory')`
+# returns an absolute path on the server's filesystem. The gate refuses
+# `PRAGMA database_list` for exactly that, and allowing the SELECT that yields
+# the same string would make the PRAGMA rule decorative.
+FILE_READING_FUNCTIONS = frozenset({
+    "read_csv", "read_csv_auto", "read_parquet", "parquet_scan",
+    "read_json", "read_json_auto", "read_json_objects", "read_ndjson",
+    "read_ndjson_auto", "read_ndjson_objects",
+    "read_text", "read_blob", "glob", "sniff_csv",
+    "current_setting",
+})
 
 
-@dataclass(frozen=True)
 class Refused(Exception):
-    """Why one statement is not going to run. `rule` is stable, `detail` is not."""
+    """Why one statement is not going to run. `rule` is stable, `detail` is not.
 
-    rule: str
-    detail: str
+    A plain exception rather than a frozen dataclass. The dataclass version
+    could not be copied or pickled, because both go through `__setattr__` on
+    a frozen instance, which is a trap for any later path that moves a refusal
+    across a process boundary.
+    """
 
-    def __str__(self) -> str:
-        return f"{self.rule}: {self.detail}"
+    def __init__(self, rule: str, detail: str) -> None:
+        super().__init__(f"{rule}: {detail}")
+        self.rule = rule
+        self.detail = detail
+
+    def __reduce__(self):
+        # `Exception.__reduce__` hands back `self.args`, which is the single
+        # formatted string, and `__init__` needs two. Without this, copy and
+        # pickle both raise TypeError on the way back in.
+        return (type(self), (self.rule, self.detail))
 
 
 def check(sql: str, known_tables: frozenset[str] | None = None) -> exp.Expression:
@@ -106,41 +139,50 @@ def _check_sources(statement: exp.Expression, known_tables: frozenset[str] | Non
     }
     for table in statement.find_all(exp.Table):
         source = table.this
+        if isinstance(source, exp.Func):
+            raise Refused(
+                "table-source", f"{_function_name(source)} is a function, not a table"
+            )
         if not isinstance(source, exp.Identifier):
             raise Refused(
                 "table-source",
-                f"{_source_name(source)} is a table function, not a table",
+                f"a {type(source).__name__.lower()} is not a table name",
             )
+        if table.catalog:
+            # ATTACH is refused, so there is exactly one catalog and naming it
+            # buys the caller nothing while adding a resolution path the
+            # catalog lookup below would have to model.
+            raise Refused("table-source", f"remove the catalog qualifier {table.catalog!r}")
         name = source.name.lower()
-        if name in bound:
+        if not table.db and name in bound:
             continue
-        if known_tables is not None and name not in known_tables:
-            raise Refused("unknown-table", f"no table or view named {source.name!r}")
+        qualified = f"{table.db.lower()}.{name}" if table.db else name
+        if known_tables is not None and qualified not in known_tables:
+            raise Refused("unknown-table", f"no table or view named {qualified!r}")
 
 
 def _check_scalars(statement: exp.Expression) -> None:
-    for call in statement.find_all(exp.Anonymous):
-        if call.name.lower() in DENIED_SCALARS:
-            raise Refused("denied-function", f"{call.name} reads the filesystem")
+    """Functions outside the FROM clause, where there is no table reference to resolve."""
+    for call in statement.find_all(exp.Func):
+        if _function_name(call) in FILE_READING_FUNCTIONS:
+            raise Refused("denied-function", f"{_function_name(call)} reads outside the statement")
 
 
-def _source_name(source: exp.Expression | None) -> str:
-    """The function's name, which sqlglot puts in two different places.
+def _function_name(call: exp.Expression) -> str:
+    """The name the caller typed, which sqlglot puts in two different places.
 
-    A function it does not model arrives as `Anonymous` carrying its name.
-    One it does model becomes its own node type, so `read_csv` is a `ReadCSV`
-    whose name attribute holds the path argument instead. `sql_name()` gives
-    READ_CSV for those, and lower-casing it back to what the caller typed is
-    the difference between a message they can act on and one about sqlglot.
+    A function it does not model arrives as `Anonymous` carrying its name. One
+    it does model becomes its own node type, so `read_csv` is a `ReadCSV` whose
+    name attribute holds the path argument instead. `sql_name()` gives READ_CSV
+    for those, and lower-casing it back to what the caller typed is the
+    difference between a message they can act on and one about sqlglot.
     """
-    if source is None:
-        return "an empty source"
-    if isinstance(source, exp.Anonymous):
-        return source.name
-    sql_name = getattr(source, "sql_name", None)
+    if isinstance(call, exp.Anonymous):
+        return call.name.lower()
+    sql_name = getattr(call, "sql_name", None)
     if callable(sql_name):
         return str(sql_name()).lower()
-    return type(source).__name__.lower()
+    return type(call).__name__.lower()
 
 
 def _first_line(exc: ParseError) -> str:

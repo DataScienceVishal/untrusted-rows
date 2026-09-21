@@ -14,12 +14,16 @@ is why the suite still passes under `--disable-socket`.
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
 from pathlib import Path
 
+import duckdb
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+
+from transcript import text_of
 
 
 async def _call(database: Path, sql: str, timeout: str = "5", row_cap: str = "500"):
@@ -40,7 +44,8 @@ def call(database: Path, sql: str, timeout: str = "5", row_cap: str = "500"):
 
 
 def error_text(result) -> str:
-    return "\n".join(block.text for block in result.content if getattr(block, "text", None))
+    """The script and the suite read a result the same way, from one place."""
+    return text_of(result)
 
 
 def test_the_server_exposes_exactly_one_tool(small_db):
@@ -99,3 +104,56 @@ def test_a_timeout_reaches_the_caller_as_a_timeout(slow_db):
     result = call(slow_db, "SELECT count(*) FROM posts a, posts b WHERE a.id + b.id < 0", "0.05")
     assert result.is_error is True
     assert "[timeout]" in error_text(result)
+
+
+def test_a_database_error_reaches_the_caller_with_its_reason(small_db):
+    """The blank-error class, found after it had been fixed for two exception types.
+
+    Only `Refused` and `TimedOut` were wrapped as deliberate, so every other
+    `duckdb.Error` arrived as "Error executing tool duckdb_query" and nothing
+    else, on a server whose stated design is that a failure names its cause.
+    """
+    result = call(small_db, "SELECT no_such_column FROM posts")
+    assert result.is_error is True
+    message = error_text(result)
+    assert "failed [" in message
+    assert "no_such_column" in message
+
+
+def test_a_table_in_another_schema_needs_its_schema(tmp_path):
+    """The catalog used to drop the schema, so the gate passed this and DuckDB did not."""
+    source = tmp_path / "schemas.duckdb"
+    build = duckdb.connect(str(source))
+    build.execute("CREATE SCHEMA sales")
+    build.execute("CREATE TABLE sales.orders AS SELECT 1 AS id, 9.99 AS total")
+    build.close()
+
+    qualified = call(source, "SELECT * FROM sales.orders")
+    assert qualified.is_error is False
+    # The total is '9.99' rather than 9.99 because DuckDB types the literal as
+    # DECIMAL and pydantic serialises a Decimal to a string to keep the digits
+    # it would lose as a float.
+    assert qualified.structured_content["rows"] == [[1, "9.99"]]
+
+    bare = call(source, "SELECT * FROM orders")
+    assert bare.is_error is True
+    assert "[unknown-table]" in error_text(bare)
+
+
+def test_a_cap_that_cannot_mean_anything_stops_the_server_starting(small_db):
+    """At startup rather than once per caller, and with an exit code rather than a traceback.
+
+    A negative row cap used to reach `fetchmany` and raise a pybind11
+    TypeError, which is not a ToolError, so the caller got a blank error. It
+    then briefly became an unhandled BadCap, which killed the server with a
+    traceback and exit 1.
+    """
+    finished = subprocess.run(
+        [sys.executable, "-m", "untrusted_rows.cli", "serve", str(small_db), "--row-cap", "-5"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert finished.returncode == 2
+    assert "row cap must be at least 1" in finished.stderr
+    assert "Traceback" not in finished.stderr

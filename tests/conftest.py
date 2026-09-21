@@ -23,9 +23,17 @@ def refusal_cases() -> dict:
 
 
 @pytest.fixture(scope="session")
-def catalog() -> frozenset[str]:
-    """The names the refusal fixture's allowed statements expect to resolve."""
-    return frozenset({"posts", "users", "recent_posts"})
+def catalog(small_db) -> frozenset[str]:
+    """Read out of the real database rather than written down here.
+
+    A hand-written set drifts from what `catalog_names` produces, and it
+    drifted the moment the catalog learned about schemas: the literal held
+    bare names only, so every gate test agreed with a catalog the server would
+    never build.
+    """
+    from untrusted_rows.connection import catalog_names, open_read_only
+
+    return catalog_names(open_read_only(small_db))
 
 
 @pytest.fixture(scope="session")

@@ -11,11 +11,19 @@ the README claims.
 
 The timeout line reports a real elapsed time and will differ between machines
 and between runs. Every other line is deterministic.
+
+Six of the eight calls are meant to fail, and the server logs each one at INFO
+level, so the child's stderr is swallowed below. Without that the transcript
+arrives with six lines of "Tool 'duckdb_query' failed" interleaved into it.
+Here the failures are the result rather than a problem with it. Setting the
+level inside the server was the first attempt and did nothing, because the
+logger doing the writing is in the child process and not in this one.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from pathlib import Path
 
@@ -42,7 +50,17 @@ async def run(database: Path) -> None:
         command=sys.executable,
         args=["-m", "untrusted_rows.cli", "serve", str(database), "--timeout", "1"],
     )
-    async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
+    # A real file descriptor, because stdio_client hands this to Popen and an
+    # in-memory buffer has no fileno.
+    with open(os.devnull, "w") as swallowed:
+        await _drive(params, database, swallowed)
+
+
+async def _drive(params, database: Path, errlog) -> None:
+    async with (
+        stdio_client(params, errlog=errlog) as (read, write),
+        ClientSession(read, write) as session,
+    ):
         await session.initialize()
         tools = await session.list_tools()
         print(f"$ untrusted-rows serve {database} --timeout 1")
@@ -58,8 +76,9 @@ async def run(database: Path) -> None:
 
 
 def _summarise(result) -> str:
+    """One line per call: the rows, or the refusal with its rule id."""
     if result.is_error:
-        return _text_of(result).splitlines()[0]
+        return text_of(result).splitlines()[0]
     structured = result.structured_content or {}
     truncation = structured.get("truncation", {})
     rows = structured.get("rows", [])
@@ -71,7 +90,8 @@ def _summarise(result) -> str:
     return shown
 
 
-def _text_of(result) -> str:
+def text_of(result) -> str:
+    """Concatenate the text blocks of a `CallToolResult`. Shared with the tests."""
     return "\n".join(block.text for block in result.content if getattr(block, "text", None))
 
 

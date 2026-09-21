@@ -35,6 +35,32 @@ def test_every_committed_allowance_is_allowed(refusal_cases, catalog):
     assert wrongly_refused == []
 
 
+def test_every_refusal_found_in_review_is_refused(refusal_cases, catalog):
+    """The second list, added after the gate existed and honest about that.
+
+    Each of these got through the first version. They are separate from the C7
+    list so that the pre-registration claim on it stays exactly true.
+    """
+    leaked = []
+    for case in refusal_cases["must_refuse_found_in_review"]:
+        try:
+            check(case["sql"], catalog)
+        except Refused:
+            continue
+        leaked.append(case["sql"])
+    assert leaked == []
+
+
+def test_every_allowance_found_in_review_is_allowed(refusal_cases, catalog):
+    wrongly_refused = []
+    for case in refusal_cases["must_allow_found_in_review"]:
+        try:
+            check(case["sql"], catalog)
+        except Refused as refusal:
+            wrongly_refused.append((case["sql"], refusal.rule))
+    assert wrongly_refused == []
+
+
 def test_the_fixture_has_both_halves(refusal_cases):
     """A fixture emptied of its allow list would make the test above vacuous."""
     assert len(refusal_cases["must_refuse"]) >= 30
@@ -92,3 +118,37 @@ def test_a_set_operation_is_a_read(catalog):
 def test_table_names_are_matched_without_regard_to_case(catalog):
     check("SELECT * FROM POSTS", catalog)
     check('SELECT * FROM "Posts"', catalog)
+
+
+def test_a_schema_qualifier_is_resolved_as_a_schema_qualifier(catalog):
+    """`main.posts` resolves and `sales.posts` does not, on the same table name."""
+    check("SELECT * FROM main.posts", catalog)
+    with pytest.raises(Refused) as caught:
+        check("SELECT * FROM sales.posts", catalog)
+    assert caught.value.rule == "unknown-table"
+
+
+def test_a_cte_name_does_not_resolve_when_it_carries_a_schema(catalog):
+    """`main.t` is a table reference even where a CTE named `t` exists."""
+    check("WITH t AS (SELECT 1 AS a) SELECT a FROM t", catalog)
+    with pytest.raises(Refused):
+        check("WITH t AS (SELECT 1 AS a) SELECT a FROM main.t", catalog)
+
+
+def test_a_refusal_can_be_pickled(catalog):
+    """The frozen dataclass version could not, which is a trap for any later
+    path that moves a refusal between processes."""
+    import copy
+    import pickle
+
+    with pytest.raises(Refused) as caught:
+        check("DROP TABLE posts", catalog)
+    assert copy.copy(caught.value).rule == "statement-type"
+    assert pickle.loads(pickle.dumps(caught.value)).rule == "statement-type"
+
+
+def test_the_message_for_a_non_function_source_does_not_call_it_a_function(catalog):
+    """It said "is a table function" for every source that was not an identifier."""
+    with pytest.raises(Refused) as caught:
+        check("SELECT * FROM a.b.c.d", catalog)
+    assert "function" not in caught.value.detail

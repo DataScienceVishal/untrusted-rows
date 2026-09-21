@@ -12,6 +12,13 @@ default rather than a restriction. The two extension settings are there because
 an extension is new code with its own filesystem and network access, and
 autoloading would fetch it on first use without anyone typing INSTALL.
 
+Their order in the dict is not load-bearing, which an earlier version of this
+file claimed it was. Opening with `lock_configuration` first and the other four
+after succeeds, and `enable_external_access` still reads False afterwards, so
+DuckDB applies the whole mapping and then locks it. The claim survived because
+the test asserting it checked the position of a dict key rather than the
+behaviour it described.
+
 `read_only=True` is separate from all of that: it refuses writes and it has
 nothing to say about reads of other files, which is the distinction the two
 layers exist to keep straight.
@@ -28,8 +35,9 @@ LOCKED_CONFIG = {
     "allow_unsigned_extensions": "false",
     "autoinstall_known_extensions": "false",
     "autoload_known_extensions": "false",
-    # Last, and it locks everything above it. Verified by the refusal fixture's
-    # `SET enable_external_access=true`, which DuckDB rejects at execution.
+    # Applies to the whole mapping regardless of where it sits in it. Verified
+    # by the refusal fixture's `SET enable_external_access=true`, which DuckDB
+    # rejects at execution.
     "lock_configuration": "true",
 }
 
@@ -43,12 +51,30 @@ def open_read_only(database: Path | str) -> duckdb.DuckDBPyConnection:
 
 
 def catalog_names(conn: duckdb.DuckDBPyConnection) -> frozenset[str]:
-    """Lower-cased tables and views, which is what the gate resolves FROM names against.
+    """Every name the gate will accept in a FROM clause, lower-cased.
 
     Views are in here with the tables. A view is a name a caller may read and
     the gate has no reason to care which kind it is. `information_schema.tables`
     reports both and DuckDB's own catalog functions need two calls to say the
     same thing.
+
+    Each table contributes its qualified `schema.table`, and its bare name only
+    when it sits in the current schema. Dropping the schema and keeping bare
+    names for everything was wrong in the direction that matters: a table
+    living only in `sales` put `orders` in this set, so the gate passed
+    `SELECT * FROM orders`, DuckDB refused it as a catalog error, and the
+    caller got a failure with no reason in it. The gate's own rule is that an
+    unresolvable name is refused here rather than by the database.
     """
-    rows = conn.execute("SELECT table_name FROM information_schema.tables").fetchall()
-    return frozenset(str(row[0]).lower() for row in rows)
+    current = conn.execute("SELECT current_schema()").fetchone()[0]
+    rows = conn.execute(
+        "SELECT table_schema, table_name FROM information_schema.tables"
+    ).fetchall()
+
+    names = set()
+    for schema, table in rows:
+        schema, table = str(schema).lower(), str(table).lower()
+        names.add(f"{schema}.{table}")
+        if schema == str(current).lower():
+            names.add(table)
+    return frozenset(names)
