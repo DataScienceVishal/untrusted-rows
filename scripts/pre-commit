@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Installed to .git/hooks/pre-commit by scripts/install-hooks.sh.
 #
-# Agents forget the style rules. This does not. It runs against the index, so
+# Style rules are easy to forget. A hook is not. It runs against the index, so
 # what gets checked is exactly what is about to be committed, not whatever
 # happens to be sitting in the working tree.
 set -euo pipefail
@@ -14,7 +14,7 @@ if [ -x .venv/bin/python ]; then
   python=.venv/bin/python
 fi
 
-# The venv's ruff, or none. The factory template guarded this block with
+# The venv's ruff, or none. An earlier version of this hook guarded the block with
 # `command -v ruff`, and the README says uv and nothing else, so uv sync puts
 # ruff in .venv/bin and never on PATH. The whole block was skipped in silence.
 # Two commits in this repository went in without the hook linting them, and it
