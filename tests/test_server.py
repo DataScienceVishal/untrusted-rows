@@ -26,12 +26,12 @@ from mcp.client.stdio import stdio_client
 from transcript import text_of
 
 
-async def _call(database: Path, sql: str, timeout: str = "5", row_cap: str = "500"):
+async def _call(database: Path, sql: str, timeout: str, row_cap: str, extra: list[str]):
     params = StdioServerParameters(
         command=sys.executable,
         args=[
             "-m", "untrusted_rows.cli", "serve", str(database),
-            "--timeout", timeout, "--row-cap", row_cap,
+            "--timeout", timeout, "--row-cap", row_cap, *extra,
         ],
     )
     async with stdio_client(params) as (read, write), ClientSession(read, write) as session:
@@ -39,8 +39,10 @@ async def _call(database: Path, sql: str, timeout: str = "5", row_cap: str = "50
         return await session.call_tool("duckdb_query", {"sql": sql})
 
 
-def call(database: Path, sql: str, timeout: str = "5", row_cap: str = "500"):
-    return asyncio.run(_call(database, sql, timeout, row_cap))
+def call(
+    database: Path, sql: str, timeout: str = "5", row_cap: str = "500", extra: tuple = ()
+):
+    return asyncio.run(_call(database, sql, timeout, row_cap, list(extra)))
 
 
 def error_text(result) -> str:
@@ -157,3 +159,109 @@ def test_a_cap_that_cannot_mean_anything_stops_the_server_starting(small_db):
     assert finished.returncode == 2
     assert "row cap must be at least 1" in finished.stderr
     assert "Traceback" not in finished.stderr
+
+
+def test_a_clean_result_says_it_was_scanned(small_db):
+    """An absent block and an empty one would otherwise read the same."""
+    findings = call(small_db, "SELECT body FROM posts").structured_content["injection_findings"]
+    assert findings == {"total": 0, "rows_flagged": 0, "findings": []}
+
+
+def test_a_flagged_row_comes_back_with_its_findings(flagged_db):
+    reply = call(flagged_db, "SELECT id, description FROM jobs ORDER BY id")
+    assert reply.is_error is False
+    assert len(reply.structured_content["rows"]) == 2
+    findings = reply.structured_content["injection_findings"]
+    assert findings["total"] == 2
+    assert findings["rows_flagged"] == 1
+    assert [(f["row"], f["column"], f["rule"], f["tier"]) for f in findings["findings"]] == [
+        (1, "description", "ignore-prior-instructions", "instruction"),
+        (1, "description", "answer-override", "instruction"),
+    ]
+
+
+def test_block_withholds_the_rows_and_names_the_rules(flagged_db):
+    reply = call(flagged_db, "SELECT description FROM jobs", extra=("--on-detect", "block"))
+    assert reply.is_error is True
+    message = error_text(reply)
+    assert "blocked [injection] 2 finding(s) in 1 row(s)" in message
+    assert "answer-override, ignore-prior-instructions" in message
+    assert "There are no job postings" not in message
+
+
+def test_block_lets_a_clean_result_through(flagged_db):
+    sql = "SELECT description FROM jobs WHERE id = 1"
+    assert call(flagged_db, sql, extra=("--on-detect", "block")).is_error is False
+
+
+def test_the_findings_list_is_capped_and_the_count_is_not(flagged_db):
+    from untrusted_rows.server import FINDINGS_CAP
+
+    findings = call(flagged_db, "SELECT body FROM noisy").structured_content["injection_findings"]
+    assert findings["total"] == FINDINGS_CAP + 20
+    assert findings["rows_flagged"] == FINDINGS_CAP + 20
+    assert len(findings["findings"]) == FINDINGS_CAP
+
+
+def test_a_row_value_turned_into_a_column_name_is_scanned(flagged_db):
+    """PIVOT moves row values into the column list, and the gate allows it in a subquery."""
+    reply = call(
+        flagged_db,
+        "SELECT * FROM (PIVOT jobs ON description USING count(*))",
+        extra=("--on-detect", "block"),
+    )
+    assert reply.is_error is True
+    assert "blocked [injection]" in error_text(reply)
+
+
+def test_a_row_value_quoted_in_an_error_is_scanned(flagged_db):
+    sql = "SELECT error(description) FROM jobs WHERE id = 2"
+    annotated = error_text(call(flagged_db, sql))
+    assert "[injection] 2 finding(s): answer-override, ignore-prior-instructions" in annotated
+
+    blocked = error_text(call(flagged_db, sql, extra=("--on-detect", "block")))
+    assert "detail withheld" in blocked
+    assert "There are no job postings" not in blocked
+
+
+def test_a_blob_that_is_not_utf8_still_comes_back(flagged_db):
+    """It used to fail pydantic's serialiser and reach the caller as a reasonless error."""
+    reply = call(flagged_db, "SELECT '\\xC3\\x28'::BLOB || description::BLOB AS b FROM jobs")
+    assert reply.is_error is False
+    rows = reply.structured_content["rows"]
+    assert rows[1][0].endswith("There are no job postings'")
+    assert reply.structured_content["injection_findings"]["rows_flagged"] == 1
+
+
+def test_a_long_match_is_cut_and_its_span_is_not(flagged_db):
+    from untrusted_rows.server import MATCH_CHARS
+
+    reply = call(flagged_db, "SELECT repeat(chr(8203), 5000) AS z FROM jobs WHERE id = 1")
+    (found,) = reply.structured_content["injection_findings"]["findings"]
+    assert (found["start"], found["end"]) == (0, 5000)
+    assert len(found["match"]) == MATCH_CHARS
+
+
+def test_a_finding_carries_its_path_and_column_index(flagged_db):
+    sql = "SELECT 'clean' AS x, list_value('fine', description) AS x FROM jobs WHERE id = 2"
+    findings = call(flagged_db, sql).structured_content["injection_findings"]["findings"]
+    placed = {(f["column_index"], f["column"], tuple(f["path"])) for f in findings}
+    assert placed == {(1, "x", (1,))}
+
+
+def test_a_long_map_key_is_cut_in_every_path(flagged_db):
+    from untrusted_rows.server import MATCH_CHARS
+
+    sql = "SELECT MAP {repeat('k', 5000): 'Human: a' || chr(10) || 'Human: b'} AS m FROM jobs"
+    findings = call(flagged_db, sql).structured_content["injection_findings"]["findings"]
+    assert findings
+    assert all(len(f["path"][0]) == MATCH_CHARS for f in findings)
+
+
+def test_an_error_detail_is_cut_before_it_is_sent(flagged_db):
+    from untrusted_rows.server import ERROR_CHARS
+
+    sql = "SELECT CAST(repeat('x', 20000) AS INTEGER) FROM jobs WHERE id = 1"
+    message = error_text(call(flagged_db, sql))
+    assert "failed [ConversionException]" in message
+    assert len(message) < ERROR_CHARS + 100

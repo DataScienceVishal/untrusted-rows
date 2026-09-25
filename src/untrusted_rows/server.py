@@ -15,16 +15,35 @@ channel, so a stray print would not be noise, it would be a malformed message.
 sqlglot's fallback warning for syntax it does not model goes through logging,
 which lands on stderr.
 
-The scanner that gives this project its name is not here yet. Slice 2 adds
-`scan_cell` and an `injection_findings` block alongside the rows. The shape of
-the result was chosen with that in mind: findings are metadata about rows that
-are returned anyway, not a reason to withhold them.
+Every string in a result goes through `scanner.scan_rows` after the caps have
+applied, column names included, so what is scanned is what is sent. BLOB
+values are decoded once by `scanner.sendable` and that one decoded value is
+both scanned and sent.
+
+Findings come back in an `injection_findings` block next to the rows and do
+not set `isError`. The rows come back too, because the server cannot know the
+agent's policy and a query that silently loses rows is worse than one that
+returns them with a warning. `--on-detect block` withholds the whole result
+instead, clean rows included, and is not the default.
+
+A DuckDB error message is stored text too: `SELECT error(description)` or a
+failed cast quotes a row value back to the caller. So the error detail is
+cut to `ERROR_CHARS`, scanned, annotated with the rules it hit, and withheld
+under `block`.
+
+The block lists at most `FINDINGS_CAP` findings and always carries the full
+count. Every string a finding repeats from the result is cut to `MATCH_CHARS`:
+the match, the column name and each MAP key in the path. Without that a
+result that fits the byte cap could send its payload again inside its own
+findings, once per finding, since a run of zero-width characters is one
+finding whose match is the entire run and a long MAP key sits in the path of
+every finding beneath it. The span still covers the whole match.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import duckdb
 from mcp.server import MCPServer
@@ -33,7 +52,23 @@ from pydantic import BaseModel, Field
 
 from untrusted_rows import query
 from untrusted_rows.connection import catalog_names, open_read_only
+from untrusted_rows.scanner import CellFinding, scan_rows, sendable
 from untrusted_rows.sql_gate import Refused, check
+
+FINDINGS_CAP = 100
+MATCH_CHARS = 200
+ERROR_CHARS = 500
+
+OnDetect = Literal["annotate", "block"]
+
+
+class InjectionFindings(BaseModel):
+    total: int = Field(description="Every finding in the result, including any not listed.")
+    rows_flagged: int
+    findings: list[dict[str, Any]] = Field(
+        description="The first findings in row order, capped. Spans index the string at `path`."
+    )
+
 
 
 class QueryOutcome(BaseModel):
@@ -46,6 +81,7 @@ class QueryOutcome(BaseModel):
         description="Caps and whether either was hit. Rows are dropped whole, never split."
     )
     elapsed_ms: float
+    injection_findings: InjectionFindings
 
 
 class QueryRefused(ToolError):
@@ -74,6 +110,16 @@ class QueryFailed(ToolError):
     what a database holds, while a column error on a statement whose table the
     caller may already `SELECT *` from tells them little they could not get by
     asking. A blank error tells them nothing at all and is the worse failure.
+    Under `--on-detect block` the text is withheld when the scanner flags it,
+    because a failed cast or `error()` can quote a row value.
+    """
+
+
+class QueryBlocked(ToolError):
+    """The result carried findings and the server was started with `--on-detect block`.
+
+    The message names the rules and the counts and none of the matched text,
+    since the matched text is the thing being withheld.
     """
 
 
@@ -83,6 +129,7 @@ def build_server(
     row_cap: int = query.DEFAULT_ROW_CAP,
     byte_cap: int = query.DEFAULT_BYTE_CAP,
     timeout_s: float = query.DEFAULT_TIMEOUT_S,
+    on_detect: OnDetect = "annotate",
 ) -> MCPServer:
     # Before the first request rather than on it. A cap that cannot mean
     # anything is a startup error, not something every caller finds out about.
@@ -123,15 +170,59 @@ def build_server(
         except query.TimedOut as expiry:
             raise QueryRefused(f"refused [timeout] {expiry}") from expiry
         except duckdb.Error as failure:
-            detail = str(failure).splitlines()[0]
-            raise QueryFailed(f"failed [{type(failure).__name__}] {detail}") from failure
+            raise QueryFailed(_failure_message(failure, on_detect)) from failure
+
+        rows = [[sendable(cell) for cell in row] for row in outcome.rows]
+        placed = scan_rows(outcome.columns, rows)
+        if placed and on_detect == "block":
+            raise QueryBlocked(_blocked_message(placed))
 
         return QueryOutcome(
             sql=sql,
             columns=outcome.columns,
-            rows=outcome.rows,
+            rows=rows,
             truncation=outcome.truncation(),
             elapsed_ms=round(outcome.elapsed_ms, 3),
+            injection_findings=InjectionFindings(
+                total=len(placed),
+                rows_flagged=len({p.row for p in placed if p.row is not None}),
+                findings=[_as_dict(p) for p in placed[:FINDINGS_CAP]],
+            ),
         )
 
     return server
+
+
+def _as_dict(placed: CellFinding) -> dict[str, Any]:
+    found = placed.finding
+    return {
+        "row": placed.row,
+        "column_index": placed.column_index,
+        "column": placed.column[:MATCH_CHARS],
+        "path": [step[:MATCH_CHARS] if isinstance(step, str) else step for step in placed.path],
+        "rule": found.rule,
+        "tier": found.tier,
+        "start": found.start,
+        "end": found.end,
+        "match": found.match[:MATCH_CHARS],
+    }
+
+
+def _blocked_message(placed: list[CellFinding]) -> str:
+    rules = ", ".join(sorted({p.finding.rule for p in placed}))
+    rows = len({p.row for p in placed if p.row is not None})
+    names = len({p.column_index for p in placed if p.row is None})
+    where = f"{rows} row(s)" + (f" and {names} column name(s)" if names else "")
+    return f"blocked [injection] {len(placed)} finding(s) in {where}: {rules}"
+
+
+def _failure_message(failure: duckdb.Error, on_detect: OnDetect) -> str:
+    detail = str(failure).splitlines()[0][:ERROR_CHARS]
+    head = f"failed [{type(failure).__name__}]"
+    placed = scan_rows(["error"], [[detail]])
+    if not placed:
+        return f"{head} {detail}"
+    rules = ", ".join(sorted({p.finding.rule for p in placed}))
+    if on_detect == "block":
+        return f"{head} detail withheld [injection] {len(placed)} finding(s): {rules}"
+    return f"{head} {detail} [injection] {len(placed)} finding(s): {rules}"

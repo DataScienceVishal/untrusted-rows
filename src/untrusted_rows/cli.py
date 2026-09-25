@@ -1,6 +1,6 @@
 """Command line entry point.
 
-`serve` is the whole of it in slice 1. `fetch`, `eval` and `report` arrive with
+`serve` is the whole of it until slice 3. `fetch`, `eval` and `report` arrive with
 the corpora in slices 3 and 4 and are not stubbed here, because a subcommand
 that parses and then says it is not implemented is a placeholder with a help
 string.
@@ -26,6 +26,12 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--row-cap", type=int, default=query.DEFAULT_ROW_CAP)
     serve.add_argument("--byte-cap", type=int, default=query.DEFAULT_BYTE_CAP)
     serve.add_argument("--timeout", type=float, default=query.DEFAULT_TIMEOUT_S)
+    serve.add_argument(
+        "--on-detect",
+        choices=["annotate", "block"],
+        default="annotate",
+        help="annotate returns flagged rows with their findings; block withholds the result",
+    )
 
     args = parser.parse_args(argv)
 
@@ -35,6 +41,7 @@ def main(argv: list[str] | None = None) -> int:
             row_cap=args.row_cap,
             byte_cap=args.byte_cap,
             timeout_s=args.timeout,
+            on_detect=args.on_detect,
         )
     except (FileNotFoundError, BadCap) as refused:
         # A bad cap used to reach here as an unhandled BadCap, so the server

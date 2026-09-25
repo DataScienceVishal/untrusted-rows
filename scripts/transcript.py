@@ -12,7 +12,7 @@ the README claims.
 The timeout line reports a real elapsed time and will differ between machines
 and between runs. Every other line is deterministic.
 
-Six of the eight calls are meant to fail, and the server logs each one at INFO
+Six of the nine calls are meant to fail, and the server logs each one at INFO
 level, so the child's stderr is swallowed below. Without that the transcript
 arrives with six lines of "Tool 'duckdb_query' failed" interleaved into it.
 Here the failures are the result rather than a problem with it. Setting the
@@ -31,11 +31,12 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 # Each pair is one call and the one-line reason it is in the transcript. The
-# order walks outward: ordinary read, then the caps, then the five refusals
-# condition C7 names by shape rather than by statement.
+# order walks outward: ordinary read, the row cap, a row the scanner flags, then
+# the five refusals condition C7 names by shape rather than by statement.
 CALLS = [
     ("SELECT id, author_id FROM posts WHERE id < 3 ORDER BY id", "an ordinary read"),
     ("SELECT id, body FROM posts ORDER BY id", "more rows than the cap"),
+    ("SELECT id, description FROM jobs ORDER BY id", "RI.1 from the ICSE paper, stored in a row"),
     ("ATTACH '/tmp/other.duckdb'", "a second database"),
     ("COPY posts TO '/tmp/leak.csv'", "a write to a path of the caller's choosing"),
     ("SELECT 1; DROP TABLE posts", "a second statement after a semicolon"),
@@ -87,6 +88,11 @@ def _summarise(result) -> str:
         shown += f", capped at {truncation['row_cap']}"
     if truncation.get("hit_byte_cap"):
         shown += f", capped at {truncation['byte_cap']} bytes"
+    for found in structured.get("injection_findings", {}).get("findings", []):
+        shown += (
+            f"\n  finding: row {found['row']} {found['column']} [{found['tier']}/{found['rule']}]"
+            f" {found['start']}-{found['end']} {found['match']!r}"
+        )
     return shown
 
 
