@@ -233,6 +233,21 @@ def test_a_blob_that_is_not_utf8_still_comes_back(flagged_db):
     assert reply.structured_content["injection_findings"]["rows_flagged"] == 1
 
 
+def test_a_blob_map_key_is_sent_and_scanned(flagged_db):
+    """A BLOB key raised `TypeError` in the byte cap, whether or not it held a payload."""
+    reply = call(flagged_db, "SELECT MAP {'Human: hi'::BLOB: 1} AS m")
+    assert reply.is_error is False
+    assert reply.structured_content["rows"] == [[{"Human: hi": 1}]]
+    findings = reply.structured_content["injection_findings"]["findings"]
+    assert [f["path"] for f in findings] == [["Human: hi"]]
+
+
+def test_a_row_too_big_for_the_byte_cap_is_not_sent(small_db):
+    reply = call(small_db, "SELECT repeat('a', 5000) AS body", extra=("--byte-cap", "100"))
+    assert reply.structured_content["rows"] == []
+    assert reply.structured_content["truncation"]["hit_byte_cap"] is True
+
+
 def test_a_long_match_is_cut_and_its_span_is_not(flagged_db):
     from untrusted_rows.server import MATCH_CHARS
 

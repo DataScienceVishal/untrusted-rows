@@ -16,9 +16,9 @@ sqlglot's fallback warning for syntax it does not model goes through logging,
 which lands on stderr.
 
 Every string in a result goes through `scanner.scan_rows` after the caps have
-applied, column names included, so what is scanned is what is sent. BLOB
-values are decoded once by `scanner.sendable` and that one decoded value is
-both scanned and sent.
+applied, column names included. BLOB values and MAP keys are converted once,
+by `scanner.sendable` called from `query._apply_byte_cap`, and that one
+converted value is measured, scanned and sent.
 
 Findings come back in an `injection_findings` block next to the rows and do
 not set `isError`. The rows come back too, because the server cannot know the
@@ -52,7 +52,7 @@ from pydantic import BaseModel, Field
 
 from untrusted_rows import query
 from untrusted_rows.connection import catalog_names, open_read_only
-from untrusted_rows.scanner import CellFinding, scan_rows, sendable
+from untrusted_rows.scanner import CellFinding, scan_rows
 from untrusted_rows.sql_gate import Refused, check
 
 FINDINGS_CAP = 100
@@ -172,15 +172,14 @@ def build_server(
         except duckdb.Error as failure:
             raise QueryFailed(_failure_message(failure, on_detect)) from failure
 
-        rows = [[sendable(cell) for cell in row] for row in outcome.rows]
-        placed = scan_rows(outcome.columns, rows)
+        placed = scan_rows(outcome.columns, outcome.rows)
         if placed and on_detect == "block":
             raise QueryBlocked(_blocked_message(placed))
 
         return QueryOutcome(
             sql=sql,
             columns=outcome.columns,
-            rows=rows,
+            rows=outcome.rows,
             truncation=outcome.truncation(),
             elapsed_ms=round(outcome.elapsed_ms, 3),
             injection_findings=InjectionFindings(

@@ -52,14 +52,42 @@ def test_the_byte_cap_drops_whole_rows(small_db):
     assert outcome.bytes_returned <= 40
 
 
-def test_a_single_row_over_the_cap_is_still_returned(small_db):
-    """Returning nothing tells the caller less than returning the row that was too big."""
+def test_a_first_row_over_the_cap_is_dropped_and_reported(small_db):
+    """A row bigger than the whole cap used to go out with `hit_byte_cap` false."""
     outcome = execute(
         open_read_only(small_db), "SELECT body FROM posts WHERE id = 0", byte_cap=1
     )
-    assert outcome.rows == [["body 0"]]
-    assert outcome.truncation()["hit_byte_cap"] is False
-    assert outcome.bytes_returned > 1
+    assert outcome.rows == []
+    assert outcome.truncation()["hit_byte_cap"] is True
+    assert outcome.bytes_returned == 0
+
+
+@pytest.mark.parametrize(
+    ("sql", "sent"),
+    [
+        ("SELECT '\\xFF\\xFE'::BLOB AS b", '["\ufffd\ufffd"]'),
+        ("SELECT 'nan'::DOUBLE AS x", "[null]"),
+        ("SELECT INTERVAL 1 DAY AS x", '["P1D"]'),
+        ("SELECT 'é' AS x", '["é"]'),
+    ],
+)
+def test_a_row_is_measured_as_the_bytes_that_are_sent(small_db, sql, sent):
+    outcome = execute(open_read_only(small_db), sql)
+    assert outcome.bytes_returned == len(sent.encode("utf-8"))
+
+
+@pytest.mark.parametrize(
+    ("key_sql", "key"),
+    [
+        ("DATE '2024-01-01'", "2024-01-01"),
+        ("'k'::BLOB", "k"),
+        ("1.5::DECIMAL(4, 2)", "1.50"),
+        ("'00000000-0000-0000-0000-000000000001'::UUID", "00000000-0000-0000-0000-000000000001"),
+    ],
+)
+def test_date_blob_decimal_and_uuid_map_keys_come_back_as_strings(small_db, key_sql, key):
+    outcome = execute(open_read_only(small_db), f"SELECT MAP {{{key_sql}: 1}} AS m")
+    assert outcome.rows == [[{key: 1}]]
 
 
 def test_both_caps_are_reported_even_when_neither_fired(small_db):

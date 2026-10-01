@@ -33,17 +33,21 @@ lock around `execute`.
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 import duckdb
+from pydantic import TypeAdapter
+
+from untrusted_rows.scanner import sendable
 
 DEFAULT_ROW_CAP = 500
 DEFAULT_BYTE_CAP = 1_000_000
 DEFAULT_TIMEOUT_S = 10.0
+
+_ROW = TypeAdapter(list[Any])
 
 
 class TimedOut(Exception):
@@ -167,17 +171,26 @@ def _apply_byte_cap(
 ) -> tuple[list[list[Any]], int, bool]:
     """Drop whole rows until the serialised size fits. A half-row is not a row.
 
-    The size measured is the JSON the server is about to send, not the width of
-    the DuckDB values, because the cap exists to bound what crosses the
-    transport. One row over the cap on its own is kept: returning nothing at all
-    tells the caller less than returning the row that was too big.
+    The size measured is the rows' JSON as pydantic writes it into
+    `structuredContent`, after `sendable`, and the rows returned are the
+    converted ones. The SDK also sends a second, indented copy as a text block,
+    so the response is larger than this figure. The previous call,
+    `json.dumps(row, default=str)`, measured a BLOB as its `b'...'` repr, a
+    non-ASCII character as a six-byte escape, and NaN as three bytes where
+    pydantic sends `null`, so a list of NaN could pass the cap and send five
+    bytes for every four measured.
+
+    A first row that alone exceeds the cap is dropped too, and the result comes
+    back empty with `hit_byte_cap` true. It used to be kept with the flag false.
+    A single cell of any size then went out reported as uncapped, and the
+    scanner read all of it after the timeout had stopped applying.
     """
     kept: list[list[Any]] = []
     total = 0
     for row in rows:
-        as_list = list(row)
-        size = len(json.dumps(as_list, default=str).encode("utf-8"))
-        if kept and total + size > byte_cap:
+        as_list = [sendable(cell) for cell in row]
+        size = len(_ROW.dump_json(as_list))
+        if total + size > byte_cap:
             return kept, total, True
         kept.append(as_list)
         total += size

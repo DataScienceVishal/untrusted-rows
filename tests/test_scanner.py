@@ -9,6 +9,8 @@ trigger than in a JSON file.
 
 from __future__ import annotations
 
+import datetime
+import decimal
 import json
 import re
 from pathlib import Path
@@ -108,6 +110,18 @@ def test_duplicate_column_names_are_told_apart_by_index():
 def test_sendable_decodes_nested_blobs_and_leaves_the_rest():
     raw = [b"\xffa", ("b", b"c"), {"k": b"v"}, 3]
     assert sendable(raw) == ["\ufffda", ["b", "c"], {"k": "v"}, 3]
+
+
+def test_sendable_stringifies_map_keys_json_rejects_and_keeps_int_keys():
+    raw = {b"k": 1, datetime.date(2024, 1, 1): 2, decimal.Decimal("1.50"): 3, 4: 4}
+    assert sendable(raw) == {"k": 1, "2024-01-01": 2, "1.50": 3, 4: 4}
+
+
+def test_two_invalid_blob_keys_stay_two_keys():
+    assert sendable({b"\xff": "Human: hi", b"\xfe": "clean"}) == {
+        "\\xff": "Human: hi",
+        "\\xfe": "clean",
+    }
 
 
 def test_a_column_name_is_scanned():

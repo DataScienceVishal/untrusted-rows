@@ -315,23 +315,36 @@ def scan_rows(columns: list[str], rows: list[list[object]]) -> list[CellFinding]
 
 
 def sendable(value: object) -> object:
-    """The value exactly as the server will send it, with every BLOB decoded once.
+    """The value exactly as it will be sent: BLOBs decoded, MAP keys made JSON keys.
 
-    One copy of the decode, used by the server before it scans and before it
-    sends, so the text scanned and the text sent cannot drift apart. Before
-    this, pydantic refused to serialise a BLOB that was not valid UTF-8 and the
-    caller received a reasonless error for every query touching that row.
-    MAP keys are left alone. A string or number key is sent as it is, and a
-    BLOB key already fails the byte cap's `json.dumps` before a result gets
-    this far.
+    `query._apply_byte_cap` calls this once per row, so the value it measures is
+    the value the scanner reads and the server sends. Before this, pydantic
+    refused to serialise a BLOB that was not valid UTF-8 and the caller
+    received a reasonless error for every query touching that row.
+
+    A BLOB key is decoded with backslash escapes for invalid bytes, not the
+    replacement character used for values, because `\\xff` and `\\xfe` would
+    both become U+FFFD and one entry would vanish from the map unflagged. Any
+    other key that is not a JSON scalar becomes its `str()`: `json.dumps`
+    ignores `default` for keys, so DATE, DECIMAL and UUID keys used to raise
+    `TypeError`. A valid key spelled with a literal backslash-x can still
+    collide with an escaped one, and then only the later entry is sent.
     """
     if isinstance(value, bytes | bytearray):
         return bytes(value).decode("utf-8", errors="replace")
     if isinstance(value, list | tuple):
         return [sendable(item) for item in value]
     if isinstance(value, dict):
-        return {key: sendable(item) for key, item in value.items()}
+        return {_sendable_key(key): sendable(item) for key, item in value.items()}
     return value
+
+
+def _sendable_key(key: object) -> str | int | float | bool | None:
+    if isinstance(key, bytes | bytearray):
+        return bytes(key).decode("utf-8", errors="backslashreplace")
+    if key is None or isinstance(key, str | int | float | bool):
+        return key
+    return str(key)
 
 
 def _strings(value: object, path: tuple[int | str, ...]):
