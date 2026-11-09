@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 import duckdb
@@ -120,6 +121,22 @@ def test_a_database_error_reaches_the_caller_with_its_reason(small_db):
     message = error_text(result)
     assert "failed [" in message
     assert "no_such_column" in message
+
+
+def test_a_timestamptz_value_comes_back(small_db):
+    """DuckDB imports pytz for TIMESTAMPTZ and does not declare it, so this used to fail."""
+    sql = "SELECT TIMESTAMPTZ '2026-01-01 12:00:00+00' AS t, now() AS n"
+    result = call(small_db, sql)
+    assert result.is_error is False
+    [[stamp, now]] = result.structured_content["rows"]
+    assert datetime.fromisoformat(stamp) == datetime(2026, 1, 1, 12, tzinfo=UTC)
+    assert datetime.fromisoformat(now).tzinfo is not None
+
+
+def test_an_error_keeps_the_lines_after_its_first(small_db):
+    result = call(small_db, "SELECT error('first line' || chr(10) || 'second line')")
+    assert result.is_error is True
+    assert "second line" in error_text(result)
 
 
 def test_a_table_in_another_schema_needs_its_schema(tmp_path):

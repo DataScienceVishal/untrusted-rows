@@ -29,7 +29,9 @@ instead, clean rows included, and is not the default.
 A DuckDB error message is stored text too: `SELECT error(description)` or a
 failed cast quotes a row value back to the caller. So the error detail is
 cut to `ERROR_CHARS`, scanned, annotated with the rules it hit, and withheld
-under `block`.
+under `block`. The cut is by length only. An earlier version kept the first
+line, which cut multi-line errors in half: DuckDB's failed-import error puts
+the Python exception on its second line.
 
 The block lists at most `FINDINGS_CAP` findings and always carries the full
 count. Every string a finding repeats from the result is cut to `MATCH_CHARS`:
@@ -216,7 +218,7 @@ def _blocked_message(placed: list[CellFinding]) -> str:
 
 
 def _failure_message(failure: duckdb.Error, on_detect: OnDetect) -> str:
-    detail = str(failure).splitlines()[0][:ERROR_CHARS]
+    detail = str(failure)[:ERROR_CHARS]
     head = f"failed [{type(failure).__name__}]"
     placed = scan_rows(["error"], [[detail]])
     if not placed:

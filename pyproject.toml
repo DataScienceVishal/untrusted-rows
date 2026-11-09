@@ -13,6 +13,10 @@ dependencies = [
     "duckdb==1.5.5",
     "sqlglot==30.18.0",
     "mcp==2.2.0",
+    # duckdb imports pytz to hand a TIMESTAMPTZ value to Python and does not
+    # declare it, so without this `SELECT now()` fails. A range is enough here:
+    # pytz decides the zone data, not which statements run.
+    "pytz>=2026.6",
 ]
 
 [project.optional-dependencies]
