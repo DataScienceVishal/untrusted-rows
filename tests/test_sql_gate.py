@@ -38,7 +38,8 @@ def test_every_committed_allowance_is_allowed(refusal_cases, catalog):
 def test_every_refusal_found_in_review_is_refused(refusal_cases, catalog):
     """The second list, added after the gate existed and honest about that.
 
-    Each of these got through the first version. They are separate from the C7
+    Each of these got through the first version, apart from the nested ones at
+    the end, which crashed it with RecursionError. They are separate from the C7
     list so that the pre-registration claim on it stays exactly true.
     """
     leaked = []
@@ -78,6 +79,7 @@ def test_the_fixture_has_both_halves(refusal_cases):
         ("SELECT * FROM glob('/x')", "table-source"),
         ("SELECT read_text('/x')", "denied-function"),
         ("SELECT * FROM nope", "unknown-table"),
+        ("SELECT " + "abs(" * 100 + "1" + ")" * 100, "too-deep"),
     ],
 )
 def test_the_rule_id_says_which_rule_fired(sql, rule, catalog):

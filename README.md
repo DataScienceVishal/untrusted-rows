@@ -317,8 +317,8 @@ every table function fails by construction has `SELECT * FROM UNNEST([1,2,3])` a
 counterexample. The test that skipped multi-statement cases justified the skip with a claim that
 DuckDB refuses a batch, which is how the second gate-only class above stayed hidden.
 
-The eight statements found this way are in `tests/fixtures/refusals.json` under
-`must_refuse_found_in_review`, kept separate from the C7 list so that the claim about the C7
+The eight statements found this way are the first eight in `tests/fixtures/refusals.json`
+under `must_refuse_found_in_review`, kept separate from the C7 list so that the claim about the C7
 list being written before the gate stays exactly true and checkable from the history.
 
 Four reviewers read slice 2 before it was committed. Two holes let a stored payload reach the

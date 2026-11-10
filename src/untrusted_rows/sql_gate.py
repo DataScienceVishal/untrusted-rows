@@ -114,6 +114,13 @@ def check(sql: str, known_tables: frozenset[str] | None = None) -> exp.Expressio
         parsed = sqlglot.parse(sql, dialect="duckdb")
     except ParseError as exc:
         raise Refused("unparseable", _first_line(exc)) from exc
+    except RecursionError as exc:
+        # sqlglot's parser recurses once per level of nesting. Run from a plain
+        # script, 40 nested function calls were enough to hit Python's limit,
+        # and a caller whose stack is already deep gets less than that. A
+        # bracket count would not match that limit, so this catches the error
+        # itself.
+        raise Refused("too-deep", "nested deeper than the parser can follow") from exc
 
     statements = [node for node in parsed if node is not None]
     if not statements:
