@@ -178,6 +178,22 @@ def test_a_cap_that_cannot_mean_anything_stops_the_server_starting(small_db):
     assert "Traceback" not in finished.stderr
 
 
+def test_the_transcript_script_passes_on_why_the_server_died(tmp_path):
+    """The script used to send the server's stderr to /dev/null, so a wrong path
+    printed the client's "Connection closed" traceback and never said which file."""
+    missing = tmp_path / "nope.duckdb"
+    script = Path(__file__).parent.parent / "scripts" / "transcript.py"
+    finished = subprocess.run(
+        [sys.executable, str(script), str(missing)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert finished.returncode == 1
+    assert f"no database at {missing}" in finished.stderr
+    assert "Traceback" not in finished.stderr
+
+
 def test_a_clean_result_says_it_was_scanned(small_db):
     """An absent block and an empty one would otherwise read the same."""
     findings = call(small_db, "SELECT body FROM posts").structured_content["injection_findings"]

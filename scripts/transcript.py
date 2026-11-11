@@ -13,22 +13,25 @@ The timeout line reports a real elapsed time and will differ between machines
 and between runs. Every other line is deterministic.
 
 Six of the nine calls are meant to fail, and the server logs each one at INFO
-level, so the child's stderr is swallowed below. Without that the transcript
-arrives with six lines of "Tool 'duckdb_query' failed" interleaved into it.
-Here the failures are the result rather than a problem with it. Setting the
-level inside the server was the first attempt and did nothing, because the
-logger doing the writing is in the child process and not in this one.
+level, so the child's stderr goes to a temporary file below. Without that the
+transcript arrives with six lines of "Tool 'duckdb_query' failed" interleaved
+into it. Here the failures are the result rather than a problem with it.
+Setting the level inside the server was the first attempt and did nothing,
+because the logger doing the writing is in the child process and not in this
+one. The file is printed only if the server dies: it then holds the reason,
+such as "no database at nope.duckdb", which the client never sees.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
+import tempfile
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
+from mcp.shared.exceptions import MCPError
 
 # Each pair is one call and the one-line reason it is in the transcript. The
 # order walks outward: ordinary read, the row cap, a row the scanner flags, then
@@ -46,15 +49,28 @@ CALLS = [
 ]
 
 
-async def run(database: Path) -> None:
+async def run(database: Path) -> int:
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "untrusted_rows.cli", "serve", str(database), "--timeout", "1"],
     )
-    # A real file descriptor, because stdio_client hands this to Popen and an
-    # in-memory buffer has no fileno.
-    with open(os.devnull, "w") as swallowed:
-        await _drive(params, database, swallowed)
+    # A real file, because stdio_client hands this to Popen and an in-memory
+    # buffer has no fileno.
+    with tempfile.TemporaryFile("w+") as server_stderr:
+        closed = False
+        try:
+            await _drive(params, database, server_stderr)
+        except* MCPError:
+            # A server that exits early reaches the client as "Connection
+            # closed" inside two nested exception groups. `return` is not
+            # allowed in an except* block, hence the flag.
+            closed = True
+        if closed:
+            server_stderr.seek(0)
+            reason = server_stderr.read().strip() or "the server closed the connection"
+            print(reason, file=sys.stderr)
+            return 1
+    return 0
 
 
 async def _drive(params, database: Path, errlog) -> None:
@@ -83,14 +99,17 @@ def _summarise(result) -> str:
     structured = result.structured_content or {}
     truncation = structured.get("truncation", {})
     rows = structured.get("rows", [])
-    shown = f"{len(rows)} row(s) {rows[:2]}"
+    if len(rows) > 2:
+        shown = f"{len(rows)} row(s), first two {rows[:2]}"
+    else:
+        shown = f"{len(rows)} row(s) {rows}"
     if truncation.get("hit_row_cap"):
         shown += f", capped at {truncation['row_cap']}"
     if truncation.get("hit_byte_cap"):
         shown += f", capped at {truncation['byte_cap']} bytes"
     for found in structured.get("injection_findings", {}).get("findings", []):
         shown += (
-            f"\n  finding: row {found['row']} {found['column']} [{found['tier']}/{found['rule']}]"
+            f"\n  finding: rows[{found['row']}] {found['column']} [{found['tier']}/{found['rule']}]"
             f" {found['start']}-{found['end']} {found['match']!r}"
         )
     return shown
@@ -102,4 +121,4 @@ def text_of(result) -> str:
 
 
 if __name__ == "__main__":
-    asyncio.run(run(Path(sys.argv[1] if len(sys.argv) > 1 else "demo.duckdb")))
+    sys.exit(asyncio.run(run(Path(sys.argv[1] if len(sys.argv) > 1 else "demo.duckdb"))))
