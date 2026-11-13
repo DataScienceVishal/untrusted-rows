@@ -137,8 +137,11 @@ Six modules. `sql_gate.py`, `query.py` and `scanner.py` carry the idea, and the 
 because it is newest.
 
 `sql_gate.py` decides whether one statement may run, using the parse tree rather than the text.
-The top-level rule is an allow-list of `SELECT` and set operations, which accounts for 15 of
-the 37 committed refusals on its own, including every write, both extension statements and
+Condition C7 of the project's spec, which is not in this repository, says the gate must refuse
+every statement on a list committed before the gate was written. That list is the 37 entries
+under `must_refuse` in `tests/fixtures/refusals.json`, committed in `53101c0`, one commit before
+`sql_gate.py` existed. The top-level rule is an allow-list of `SELECT` and set operations, which
+accounts for 15 of the 37 on its own, including every write, both extension statements and
 `SET`. `WITH` is not in the list because sqlglot hangs a CTE off the `SELECT` that follows it,
 so it never arrives as a node of its own.
 
@@ -223,11 +226,12 @@ instruction and format tiers, including "Ignore the instructions above", and ass
 still missed so that a rule change cannot quietly make the list stale. The regression file is
 synthetic, says so in its first field, and never enters a detection rate.
 
-Condition C9, pre-registered in the project's spec before any code, allows the scanner 10 ms per
-500-row result on a laptop CPU. `scripts/throughput.py` times that over cells cut from this
-README as it stood at the end of slice 1, read out of git so that this paragraph cannot change
-its own input. The largest cell it tries is the longest a default 500-row result carries under
-the byte cap. On an Apple M4:
+Condition C9, written in the same spec before any code, allows the scanner 10 ms per 500-row
+result on a laptop CPU. Unlike C7, that ordering cannot be checked from the history: the
+figure first appears in this repository in `dec5aee`, the commit that added the scanner.
+`scripts/throughput.py` times that over cells cut from this README as it stood at the end of
+slice 1, read out of git so that this paragraph cannot change its own input. The largest cell
+it tries is the longest a default 500-row result carries under the byte cap. On an Apple M4:
 
 ```
 arm64 Darwin, Python 3.12.12
