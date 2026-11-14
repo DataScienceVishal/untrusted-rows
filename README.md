@@ -168,6 +168,15 @@ answer rather than a short one. Fetching one row past the cap is how truncation 
 without pulling the whole result into memory, and the truncation metadata goes back with the
 rows, because a short result and a capped result are otherwise indistinguishable.
 
+The byte cap counts the rows once, as the compact JSON that goes into `structuredContent`, and
+that count is `bytes_returned` in the truncation metadata. The MCP SDK sends the same result a
+second time, as a text block it writes with `indent=2`. So a response is always more than twice
+`bytes_returned`, and for rows of short values, where the indentation and line breaks outweigh
+the values themselves, it is several times that. The cap bounds the rows, which are most of
+what the scanner reads. Column names are scanned as well and the cap does not count them. The
+second copy repeats the same text and adds none. A client that has to bound the size of what it
+receives cannot do it with `--byte-cap` alone.
+
 `connection.py` opens the file read-only with external access off, extensions off and the
 configuration locked. The order matters: `lock_configuration` locks whatever is set when it
 runs, and without it `enable_external_access=false` is a default rather than a restriction.
