@@ -135,10 +135,12 @@ def execute(
 
     fetched = outcome.rows
     hit_row_cap = len(fetched) > row_cap
-    kept, total_bytes, hit_byte_cap = _apply_byte_cap(fetched[:row_cap], byte_cap)
+    columns, kept, total_bytes, hit_byte_cap = _apply_byte_cap(
+        outcome.columns, fetched[:row_cap], byte_cap
+    )
 
     return QueryResult(
-        columns=outcome.columns,
+        columns=columns,
         rows=kept,
         elapsed_ms=elapsed_ms,
         bytes_returned=total_bytes,
@@ -167,13 +169,19 @@ def check_limits(row_cap: int, byte_cap: int, timeout_s: float) -> None:
 
 
 def _apply_byte_cap(
-    rows: list[tuple[Any, ...]], byte_cap: int
-) -> tuple[list[list[Any]], int, bool]:
-    """Drop whole rows until the serialised size fits. A half-row is not a row.
+    columns: list[str], rows: list[tuple[Any, ...]], byte_cap: int
+) -> tuple[list[str], list[list[Any]], int, bool]:
+    """Drop whole rows, or the column names too, until the serialised size fits.
 
-    The size measured is the rows' JSON as pydantic writes it into
-    `structuredContent`, after `sendable`, and the rows returned are the
-    converted ones. The SDK also sends a second, indented copy as a text block,
+    A half-row is not a row. The column names are counted first, as their JSON
+    list, because `PIVOT` turns row values into column names.
+    `test_a_long_column_name_counts_against_the_byte_cap` pins this. Names that
+    alone exceed the cap are dropped along with every row. Cutting a name short
+    would send a column the statement never produced.
+
+    The size measured is the column names' JSON plus each row's JSON as
+    pydantic writes it into `structuredContent`, after `sendable`, and the rows
+    returned are the converted ones. The SDK also sends a second, indented copy as a text block,
     so the response is larger than this figure. The previous call,
     `json.dumps(row, default=str)`, measured a BLOB as its `b'...'` repr, a
     non-ASCII character as a six-byte escape, and NaN as three bytes where
@@ -185,13 +193,15 @@ def _apply_byte_cap(
     A single cell of any size then went out reported as uncapped, and the
     scanner read all of it after the timeout had stopped applying.
     """
+    total = len(_ROW.dump_json(columns))
+    if total > byte_cap:
+        return [], [], 0, True
     kept: list[list[Any]] = []
-    total = 0
     for row in rows:
         as_list = [sendable(cell) for cell in row]
         size = len(_ROW.dump_json(as_list))
         if total + size > byte_cap:
-            return kept, total, True
+            return columns, kept, total, True
         kept.append(as_list)
         total += size
-    return kept, total, False
+    return columns, kept, total, False

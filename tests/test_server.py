@@ -281,6 +281,14 @@ def test_a_row_too_big_for_the_byte_cap_is_not_sent(small_db):
     assert reply.structured_content["truncation"]["hit_byte_cap"] is True
 
 
+def test_a_column_name_too_big_for_the_byte_cap_is_not_sent(small_db):
+    sql = "SELECT * FROM (PIVOT (SELECT repeat(body, 1000) AS b FROM posts) ON b USING count(*))"
+    reply = call(small_db, sql, extra=("--byte-cap", "100"))
+    assert reply.structured_content["columns"] == []
+    assert reply.structured_content["rows"] == []
+    assert reply.structured_content["truncation"]["hit_byte_cap"] is True
+
+
 def test_a_long_match_is_cut_and_its_span_is_not(flagged_db):
     from untrusted_rows.server import MATCH_CHARS
 

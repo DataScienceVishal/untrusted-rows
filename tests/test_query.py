@@ -55,17 +55,31 @@ def test_the_byte_cap_drops_whole_rows(small_db):
 def test_a_first_row_over_the_cap_is_dropped_and_reported(small_db):
     """A row bigger than the whole cap used to go out with `hit_byte_cap` false."""
     outcome = execute(
-        open_read_only(small_db), "SELECT body FROM posts WHERE id = 0", byte_cap=1
+        open_read_only(small_db), "SELECT body FROM posts WHERE id = 0", byte_cap=10
     )
+    assert outcome.columns == ["body"]
     assert outcome.rows == []
     assert outcome.truncation()["hit_byte_cap"] is True
-    assert outcome.bytes_returned == 0
+    assert outcome.bytes_returned == 8
+
+
+def test_column_names_exactly_at_the_byte_cap_are_kept(small_db):
+    """`["id"]` is 6 bytes and `[0]` is 3, so 6 keeps the names and 9 keeps the row too."""
+    sql = "SELECT id FROM posts WHERE id = 0"
+    names_only = execute(open_read_only(small_db), sql, byte_cap=6)
+    assert names_only.columns == ["id"]
+    assert names_only.rows == []
+    assert names_only.bytes_returned == 6
+
+    whole = execute(open_read_only(small_db), sql, byte_cap=9)
+    assert whole.rows == [[0]]
+    assert whole.truncation()["hit_byte_cap"] is False
 
 
 @pytest.mark.parametrize(
     ("sql", "sent"),
     [
-        ("SELECT '\\xFF\\xFE'::BLOB AS b", '["\ufffd\ufffd"]'),
+        ("SELECT '\\xFF\\xFE'::BLOB AS x", '["\ufffd\ufffd"]'),
         ("SELECT 'nan'::DOUBLE AS x", "[null]"),
         ("SELECT INTERVAL 1 DAY AS x", '["P1D"]'),
         ("SELECT 'é' AS x", '["é"]'),
@@ -73,7 +87,29 @@ def test_a_first_row_over_the_cap_is_dropped_and_reported(small_db):
 )
 def test_a_row_is_measured_as_the_bytes_that_are_sent(small_db, sql, sent):
     outcome = execute(open_read_only(small_db), sql)
-    assert outcome.bytes_returned == len(sent.encode("utf-8"))
+    assert outcome.bytes_returned == len('["x"]') + len(sent.encode("utf-8"))
+
+
+def test_a_long_column_name_counts_against_the_byte_cap(small_db):
+    """PIVOT makes a row value a column name, so the name counts against the cap."""
+    outcome = execute(
+        open_read_only(small_db),
+        "PIVOT (SELECT repeat('a', 5000) AS body) ON body USING count(*)",
+        byte_cap=100,
+    )
+    assert outcome.columns == []
+    assert outcome.rows == []
+    assert outcome.truncation()["hit_byte_cap"] is True
+    assert outcome.bytes_returned == 0
+
+
+def test_column_names_that_fit_leave_less_room_for_rows(small_db):
+    short = execute(open_read_only(small_db), "SELECT id FROM posts ORDER BY id", byte_cap=20)
+    long = execute(
+        open_read_only(small_db), f"SELECT id AS {'i' * 12} FROM posts ORDER BY id", byte_cap=20
+    )
+    assert len(short.rows) > len(long.rows)
+    assert long.bytes_returned <= 20
 
 
 @pytest.mark.parametrize(
