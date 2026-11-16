@@ -179,10 +179,14 @@ def _apply_byte_cap(
     alone exceed the cap are dropped along with every row. Cutting a name short
     would send a column the statement never produced.
 
-    The size measured is the column names' JSON plus each row's JSON as
+    The size measured is the column names' JSON plus the rows' JSON list as
     pydantic writes it into `structuredContent`, after `sendable`, and the rows
-    returned are the converted ones. The SDK also sends a second, indented copy as a text block,
-    so the response is larger than this figure. The previous call,
+    returned are the converted ones. The rows list's brackets and the commas
+    between rows are counted, so `bytes_returned` is the two lists' combined
+    length. The one exception is names over the cap, reported as 0 although
+    the two empty lists are 4 bytes.
+    The SDK also sends a second, indented copy as a text block, so the
+    response is larger than this figure. The previous call,
     `json.dumps(row, default=str)`, measured a BLOB as its `b'...'` repr, a
     non-ASCII character as a six-byte escape, and NaN as three bytes where
     pydantic sends `null`, so a list of NaN could pass the cap and send five
@@ -193,13 +197,13 @@ def _apply_byte_cap(
     A single cell of any size then went out reported as uncapped, and the
     scanner read all of it after the timeout had stopped applying.
     """
-    total = len(_ROW.dump_json(columns))
+    total = len(_ROW.dump_json(columns)) + len(b"[]")
     if total > byte_cap:
         return [], [], 0, True
     kept: list[list[Any]] = []
     for row in rows:
         as_list = [sendable(cell) for cell in row]
-        size = len(_ROW.dump_json(as_list))
+        size = len(_ROW.dump_json(as_list)) + (1 if kept else 0)
         if total + size > byte_cap:
             return columns, kept, total, True
         kept.append(as_list)

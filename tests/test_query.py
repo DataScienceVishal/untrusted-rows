@@ -60,18 +60,24 @@ def test_a_first_row_over_the_cap_is_dropped_and_reported(small_db):
     assert outcome.columns == ["body"]
     assert outcome.rows == []
     assert outcome.truncation()["hit_byte_cap"] is True
-    assert outcome.bytes_returned == 8
+    assert outcome.bytes_returned == len('["body"]') + len("[]")
 
 
 def test_column_names_exactly_at_the_byte_cap_are_kept(small_db):
-    """`["id"]` is 6 bytes and `[0]` is 3, so 6 keeps the names and 9 keeps the row too."""
+    """`["id"]` with an empty `[]` is 8 bytes and with `[[0]]` is 11."""
     sql = "SELECT id FROM posts WHERE id = 0"
-    names_only = execute(open_read_only(small_db), sql, byte_cap=6)
+    nothing = execute(open_read_only(small_db), sql, byte_cap=7)
+    assert nothing.columns == []
+
+    names_only = execute(open_read_only(small_db), sql, byte_cap=8)
     assert names_only.columns == ["id"]
     assert names_only.rows == []
-    assert names_only.bytes_returned == 6
+    assert names_only.bytes_returned == 8
 
-    whole = execute(open_read_only(small_db), sql, byte_cap=9)
+    short_by_one = execute(open_read_only(small_db), sql, byte_cap=10)
+    assert short_by_one.rows == []
+
+    whole = execute(open_read_only(small_db), sql, byte_cap=11)
     assert whole.rows == [[0]]
     assert whole.truncation()["hit_byte_cap"] is False
 
@@ -87,7 +93,20 @@ def test_column_names_exactly_at_the_byte_cap_are_kept(small_db):
 )
 def test_a_row_is_measured_as_the_bytes_that_are_sent(small_db, sql, sent):
     outcome = execute(open_read_only(small_db), sql)
-    assert outcome.bytes_returned == len('["x"]') + len(sent.encode("utf-8"))
+    assert outcome.bytes_returned == len('["x"]') + len(f"[{sent}]".encode())
+
+
+def test_the_commas_between_rows_count_against_the_byte_cap(small_db):
+    """`["id"]` is 6 bytes and `[[0],[1],[2]]` is 13: 9 for the rows, 2 brackets, 2 commas."""
+    sql = "SELECT id FROM posts WHERE id < 3 ORDER BY id"
+    whole = execute(open_read_only(small_db), sql, byte_cap=19)
+    assert whole.rows == [[0], [1], [2]]
+    assert whole.bytes_returned == 19
+    assert whole.truncation()["hit_byte_cap"] is False
+
+    cut = execute(open_read_only(small_db), sql, byte_cap=18)
+    assert cut.rows == [[0], [1]]
+    assert cut.bytes_returned == len('["id"]') + len("[[0],[1]]")
 
 
 def test_a_long_column_name_counts_against_the_byte_cap(small_db):
