@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+import tracemalloc
 
 import duckdb
 import pytest
@@ -61,6 +62,45 @@ def test_a_first_row_over_the_cap_is_dropped_and_reported(small_db):
     assert outcome.rows == []
     assert outcome.truncation()["hit_byte_cap"] is True
     assert outcome.bytes_returned == len('["body"]') + len("[]")
+
+
+def test_rows_past_the_byte_cap_are_not_held_in_memory(small_db):
+    """Python memory stays near the kept rows, however long the result is.
+
+    The kept rows plus the one being measured peak at about 1.1 MB under
+    tracemalloc. The 5 MB limit is margin, somewhere between that and the
+    roughly 50 MB that holding all 501 fetched rows reads. tracemalloc does not
+    see DuckDB's own buffers, which still hold the whole result, so this is not
+    a bound on process memory.
+    """
+    tracemalloc.start()
+    try:
+        outcome = execute(
+            open_read_only(small_db), "SELECT repeat('x', 100000) AS c FROM range(600)"
+        )
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(outcome.rows) == 9
+    assert outcome.truncation()["hit_byte_cap"] is True
+    assert outcome.truncation()["hit_row_cap"] is True
+    assert peak < 5 * outcome.byte_cap
+
+
+def test_the_byte_cap_firing_first_does_not_fake_a_row_cap_hit(small_db):
+    """Six rows under a row cap of 500, so the row cap never fired.
+
+    The byte cap stops keeping rows after the second. This guards the drain in
+    `execute`: without it, the fetchone after the byte cap stops would see the
+    fourth row, since the byte cap already read the third to find it too big,
+    and report a row cap hit.
+    """
+    outcome = execute(
+        open_read_only(small_db), "SELECT id, body FROM posts ORDER BY id", byte_cap=40
+    )
+    assert len(outcome.rows) == 2
+    assert outcome.truncation()["hit_byte_cap"] is True
+    assert outcome.truncation()["hit_row_cap"] is False
 
 
 def test_column_names_exactly_at_the_byte_cap_are_kept(small_db):

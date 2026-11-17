@@ -17,8 +17,18 @@ turns one bad query into a dead server.
 Both caps apply after execution, not as a rewritten LIMIT. Rewriting the
 caller's SQL means the rows returned are not the rows the statement asked for,
 and an aggregate over a silently limited scan is a wrong answer rather than a
-short one. Fetching one row past the cap is how truncation is detected without
-pulling the whole result into memory.
+short one.
+
+Rows are fetched one at a time and measured as they arrive, so the Python side
+holds the kept rows plus the one being measured. The row cap's truncation is
+detected by fetching row `row_cap + 1`. Rows the byte cap left unread are still
+fetched and dropped one at a time, so `hit_row_cap` means the same thing
+whichever cap fired first. This bounds Python memory only. DuckDB builds the
+whole result in its own memory inside `cursor.execute`, before the first fetch,
+so process memory still grows with the full result. On 600 cells of 100,000
+characters under the default caps, peak Python memory measured with
+`tracemalloc` is about 1.1 MB to return 0.9 MB. The measuring runs on the
+worker thread, so it counts toward the deadline and toward `elapsed_ms`.
 
 Every call gets its own `conn.cursor()`, and that is a correctness requirement
 rather than tidiness. DuckDB's `execute` returns the connection, so the result
@@ -33,8 +43,10 @@ lock around `execute`.
 
 from __future__ import annotations
 
+import itertools
 import threading
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -84,7 +96,10 @@ class QueryResult:
 @dataclass
 class _Outcome:
     columns: list[str] = field(default_factory=list)
-    rows: list[tuple[Any, ...]] = field(default_factory=list)
+    rows: list[list[Any]] = field(default_factory=list)
+    bytes_returned: int = 0
+    hit_row_cap: bool = False
+    hit_byte_cap: bool = False
     error: BaseException | None = None
 
 
@@ -105,8 +120,20 @@ def execute(
     def run() -> None:
         try:
             cursor.execute(sql)
-            outcome.columns = [d[0] for d in (cursor.description or [])]
-            outcome.rows = cursor.fetchmany(row_cap + 1)
+            names = [d[0] for d in (cursor.description or [])]
+            within_row_cap = itertools.islice(iter(cursor.fetchone, None), row_cap)
+            (
+                outcome.columns,
+                outcome.rows,
+                outcome.bytes_returned,
+                outcome.hit_byte_cap,
+            ) = _apply_byte_cap(names, within_row_cap, byte_cap)
+            # Fetch and drop whatever the byte cap left unread. Without this the
+            # fetchone below sees the row after the one the byte cap stopped at
+            # and reports a row cap hit.
+            for _ in within_row_cap:
+                pass
+            outcome.hit_row_cap = cursor.fetchone() is not None
         except BaseException as exc:  # noqa: BLE001
             # Deliberately blanket. This runs on a worker thread, where an
             # uncaught exception is printed to stderr and then lost, and the
@@ -133,21 +160,15 @@ def execute(
     if outcome.error is not None:
         raise outcome.error
 
-    fetched = outcome.rows
-    hit_row_cap = len(fetched) > row_cap
-    columns, kept, total_bytes, hit_byte_cap = _apply_byte_cap(
-        outcome.columns, fetched[:row_cap], byte_cap
-    )
-
     return QueryResult(
-        columns=columns,
-        rows=kept,
+        columns=outcome.columns,
+        rows=outcome.rows,
         elapsed_ms=elapsed_ms,
-        bytes_returned=total_bytes,
+        bytes_returned=outcome.bytes_returned,
         row_cap=row_cap,
         byte_cap=byte_cap,
-        hit_row_cap=hit_row_cap,
-        hit_byte_cap=hit_byte_cap,
+        hit_row_cap=outcome.hit_row_cap,
+        hit_byte_cap=outcome.hit_byte_cap,
     )
 
 
@@ -169,7 +190,7 @@ def check_limits(row_cap: int, byte_cap: int, timeout_s: float) -> None:
 
 
 def _apply_byte_cap(
-    columns: list[str], rows: list[tuple[Any, ...]], byte_cap: int
+    columns: list[str], rows: Iterable[tuple[Any, ...]], byte_cap: int
 ) -> tuple[list[str], list[list[Any]], int, bool]:
     """Drop whole rows, or the column names too, until the serialised size fits.
 
