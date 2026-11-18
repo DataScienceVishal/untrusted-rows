@@ -56,9 +56,12 @@ the long s in "re\u017fpond" would match the regex and be skipped by the filter.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Any, Literal
+
+from pydantic import TypeAdapter
 
 Tier = Literal["format", "obfuscation", "instruction"]
 TIERS: tuple[Tier, ...] = ("format", "obfuscation", "instruction")
@@ -276,7 +279,10 @@ class CellFinding:
 
     `path` is empty for a plain string cell. For a LIST, STRUCT or MAP it is
     the list indices and keys walked to reach the string that matched. A MAP
-    key is scanned as well as its value, because both reach the caller, and a
+    key is always a string here, spelled as the caller receives it, because
+    JSON object keys are strings: `{1: ...}` goes out as `"1"` and `True` as
+    `"true"`. An int step is therefore always a list index. A MAP key is
+    scanned as well as its value, because both reach the caller, and a
     hit in the key carries the same path as its value would. Usually the span
     and the matched text tell the two apart; a key identical to its value
     gives two identical entries.
@@ -355,6 +361,16 @@ def _strings(value: object, path: tuple[int | str, ...]):
             yield from _strings(item, (*path, n))
     elif isinstance(value, dict):
         for key, item in value.items():
-            step = key if isinstance(key, str | int) else str(key)
+            step = key if isinstance(key, str) else _wire_key(key)
             yield from _strings(key, (*path, step))
             yield from _strings(item, (*path, step))
+
+
+_ONE_KEY = TypeAdapter(dict[Any, None])
+
+
+def _wire_key(key: object) -> str:
+    # The server's reply goes out through pydantic with its default settings, so
+    # this asks pydantic too. It sends a NaN or infinite key as "None".
+    (spelled,) = json.loads(_ONE_KEY.dump_json({key: None}))
+    return spelled

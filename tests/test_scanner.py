@@ -203,6 +203,12 @@ def test_strings_nested_in_lists_and_maps_are_scanned():
     ]
 
 
+def test_a_map_key_in_a_path_is_spelled_as_it_is_sent():
+    keys = [1, True, False, 1.5, float("nan")]
+    placed = scan_rows(["m"], [[{key: "Human: x"}] for key in keys])
+    assert [p.path for p in placed] == [("1",), ("true",), ("false",), ("1.5",), ("None",)]
+
+
 def test_a_blob_is_scanned_as_the_text_the_caller_receives():
     placed = scan_rows(["b"], [[sendable(b"\xe2\x80\x8bhidden")]])
     assert [(p.finding.rule, p.finding.match) for p in placed] == [("zero-width", "\u200b")]

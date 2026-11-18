@@ -275,6 +275,15 @@ def test_a_blob_map_key_is_sent_and_scanned(flagged_db):
     assert [f["path"] for f in findings] == [["Human: hi"]]
 
 
+def test_an_int_or_bool_map_key_is_a_string_in_the_path(flagged_db):
+    """A MAP key in a path is the JSON key the row carries, so 1 is "1", not a list index."""
+    sql = "SELECT MAP {1: 'Human: hi'} AS i, MAP {true: ['Human: hi']} AS b"
+    reply = call(flagged_db, sql)
+    assert reply.structured_content["rows"] == [[{"1": "Human: hi"}, {"true": ["Human: hi"]}]]
+    findings = reply.structured_content["injection_findings"]["findings"]
+    assert [f["path"] for f in findings] == [["1"], ["true", 0]]
+
+
 def test_a_row_too_big_for_the_byte_cap_is_not_sent(small_db):
     reply = call(small_db, "SELECT repeat('a', 5000) AS body", extra=("--byte-cap", "100"))
     assert reply.structured_content["rows"] == []
