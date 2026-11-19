@@ -340,7 +340,7 @@ Four reviewers read slice 2 before it was committed. Two holes let a stored payl
 caller unscanned, `--on-detect block` included: `PIVOT` inside a subquery turns row values into
 column names, and `SELECT error(description)` quotes a row back inside the error message. Both
 paths are scanned now. A `BLOB` that was not valid UTF-8 made pydantic refuse to serialise the
-whole result, which reached the caller as the reasonless error again, and is now decoded once
+whole result, which again reached the caller with no reason in it, and is now decoded once
 before it is scanned or sent. The first throughput table was pure ASCII and so never paid for
 the obfuscation tier. One curly apostrophe per cell made the same script far slower, and most
 of that was `str.translate`, which is now skipped when there is nothing to fold.

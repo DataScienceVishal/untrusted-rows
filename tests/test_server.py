@@ -110,7 +110,7 @@ def test_a_timeout_reaches_the_caller_as_a_timeout(slow_db):
 
 
 def test_a_database_error_reaches_the_caller_with_its_reason(small_db):
-    """The blank-error class, found after it had been fixed for two exception types.
+    """Found after the server's own errors were fixed and the rest were not.
 
     Only `Refused` and `TimedOut` were wrapped as deliberate, so every other
     `duckdb.Error` arrived as "Error executing tool duckdb_query" and nothing
@@ -163,9 +163,9 @@ def test_a_cap_that_cannot_mean_anything_stops_the_server_starting(small_db):
     """At startup rather than once per caller, and with an exit code rather than a traceback.
 
     A negative row cap used to reach `fetchmany` and raise a pybind11
-    TypeError, which is not a ToolError, so the caller got a blank error. It
-    then briefly became an unhandled BadCap, which killed the server with a
-    traceback and exit 1.
+    TypeError, which is not a ToolError, so the caller got a failure with no
+    reason in it. It then briefly became an unhandled BadCap, which killed the
+    server with a traceback and exit 1.
     """
     finished = subprocess.run(
         [sys.executable, "-m", "untrusted_rows.cli", "serve", str(small_db), "--row-cap", "-5"],
@@ -258,7 +258,9 @@ def test_a_row_value_quoted_in_an_error_is_scanned(flagged_db):
 
 
 def test_a_blob_that_is_not_utf8_still_comes_back(flagged_db):
-    """It used to fail pydantic's serialiser and reach the caller as a reasonless error."""
+    """It used to fail pydantic's serialiser and reach the caller as a failure with
+    no reason in it.
+    """
     reply = call(flagged_db, "SELECT '\\xC3\\x28'::BLOB || description::BLOB AS b FROM jobs")
     assert reply.is_error is False
     rows = reply.structured_content["rows"]

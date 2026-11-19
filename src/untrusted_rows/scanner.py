@@ -326,7 +326,7 @@ def sendable(value: object) -> object:
     `query._apply_byte_cap` calls this once per row, so the value it measures is
     the value the scanner reads and the server sends. Before this, pydantic
     refused to serialise a BLOB that was not valid UTF-8 and the caller
-    received a reasonless error for every query touching that row.
+    received a failure with no reason in it for every query touching that row.
 
     A BLOB key is decoded with backslash escapes for invalid bytes, not the
     replacement character used for values, because `\\xff` and `\\xfe` would

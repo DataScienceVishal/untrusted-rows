@@ -289,7 +289,7 @@ def test_one_callers_timeout_does_not_cancel_another_query(slow_db):
 )
 def test_a_cap_that_cannot_mean_anything_is_refused_before_the_query(row_cap, byte_cap, timeout_s):
     """`--row-cap -5` reached `fetchmany(-4)` and raised a pybind11 TypeError,
-    which is not a ToolError, so the caller got a blank error. A timeout of 0
-    was worse: every query raised TimedOut before it started."""
+    which is not a ToolError, so the caller got a failure with no reason in it.
+    A timeout of 0 was worse: every query raised TimedOut before it started."""
     with pytest.raises(BadCap):
         check_limits(row_cap, byte_cap, timeout_s)

@@ -111,7 +111,8 @@ class QueryFailed(ToolError):
     exists at the gate: table names are worth withholding because they map
     what a database holds, while a column error on a statement whose table the
     caller may already `SELECT *` from tells them little they could not get by
-    asking. A blank error tells them nothing at all and is the worse failure.
+    asking. A failure with no reason in it tells them nothing and is the worse
+    failure.
     Under `--on-detect block` the text is withheld when the scanner flags it,
     because a failed cast or `error()` can quote a row value.
     """
