@@ -242,7 +242,8 @@ result on a laptop CPU. Unlike C7, that ordering cannot be checked from the hist
 figure first appears in this repository in `dec5aee`, the commit that added the scanner.
 `scripts/throughput.py` times that over cells cut from this README as it stood at the end of
 slice 1, read out of git so that this paragraph cannot change its own input. The largest cell
-it tries is the longest a default 500-row result carries under the byte cap. On an Apple M4:
+it tries is 1,900 characters. The default caps, 500 rows and 1,000,000 bytes, leave 2,000 bytes a
+row on average, and the JSON around and inside each cell takes some of that. On an Apple M4:
 
 ```
 arm64 Darwin, Python 3.12.12

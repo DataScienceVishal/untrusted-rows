@@ -15,10 +15,11 @@ path and makes Python store it at two bytes a character, which every regex
 then pays for, and real post bodies carry curly apostrophes routinely. Slice 3
 re-times over real post bodies and that run, not this one, decides C9.
 
-Cell length is swept up to the longest a default 500-row result can carry
-under the 1,000,000-byte cap. From 500 characters up the cost grows faster than
-the length, because a longer cell is more likely to contain a needle and so
-runs more regexes.
+Cell length is swept up to 1,900 characters, a round figure under the 2,000
+bytes a row that the 1,000,000-byte cap leaves for 500 rows. The JSON quoting
+takes some of each row, so the true longest depends on the text. From 500
+characters up the cost grows faster than the length, because a longer cell is
+more likely to contain a needle and so runs more regexes.
 
 Needs a clone with history, since the input is read out of git.
 
