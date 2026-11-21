@@ -8,7 +8,7 @@ from untrusted_rows.sql_gate import Refused, check
 
 
 def test_every_committed_refusal_is_refused(refusal_cases, catalog):
-    """C7. The fixture was committed in 2b2901f, one commit before this gate existed.
+    """C7. The fixture was committed in 53101c0, one commit before this gate existed.
 
     Reported as one list rather than one assertion per case, because the first
     question after a failure is whether one statement got through or the gate

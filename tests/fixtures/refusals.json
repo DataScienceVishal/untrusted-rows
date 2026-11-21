@@ -196,7 +196,7 @@
       "why": "a scalar function that is not on the deny-list, so the deny-list is not a ban on functions"
     }
   ],
-  "note_on_the_section_below": "Everything in must_refuse above is the C7 list, committed in 2b2901f before the gate existed, and it has not been touched since. The statements below were found after the gate was written, by a code-smell audit and an adversary pass, and every one of the first eight got through. They are kept in their own list so the pre-registration claim on the first list stays exactly true and a reader can check which is which from the git history. Added 2026-09-21. The three nested statements at the end were added 2026-11-10. The first two came from the slice 2 review and the third was added with them. None of the three got through: the gate raised RecursionError on them instead of refusing.",
+  "note_on_the_section_below": "Everything in must_refuse above is the C7 list, committed in 53101c0 before the gate existed, and it has not been touched since. The statements below were found after the gate was written, by a code-smell audit and an adversary pass, and every one of the first eight got through. They are kept in their own list so the pre-registration claim on the first list stays exactly true and a reader can check which is which from the git history. Added 2026-09-21. The three nested statements at the end were added 2026-11-10. The first two came from the slice 2 review and the third was added with them. None of the three got through: the gate raised RecursionError on them instead of refusing.",
   "must_refuse_found_in_review": [
     {
       "sql": "SELECT read_csv('/etc/passwd')",
